@@ -1,0 +1,3 @@
+[submodule "FastLED-SoundReactive"]
+	path = FastLED-SoundReactive
+	url = https://github.com/atuline/FastLED-SoundReactive.git

@@ -105,13 +105,64 @@ bool musicAnalyzerToggle = false;
 bool allLedsToggle = false;
 int STROBE_DELAY = 0;
 bool StrobeAllToggle = false;
+bool coolToggle = true;
+bool pixelsToggle = false;
+
+bool RED0 = false;
+bool RED1 = false;
+bool S0 = false;
+// ------------------------------------
+#define qsubd(x, b)                                                            \
+  ((x > b) ? b : 0) // Digital unsigned subtraction macro. if result <0, then =>
+                    // 0. Otherwise, take on fixed value.
+#define qsuba(x, b)                                                            \
+  ((x > b) ? x - b                                                             \
+           : 0) // Analog Unsigned subtraction macro. if result <0, then => 0
+#define FASTLED_ALLOW_INTERRUPTS 0 // Used for ESP8266.
+#include "FastLED.h"               // FastLED library.
+
+#define MIC_PIN 5 // Analog port for microphone
+uint8_t squelch =
+    7;      // Anything below this is background noise, so we'll make it '0'.
+int sample; // Current sample.
+float sampleAvg = 0; // Smoothed Average.
+float micLev = 0;    // Used to convert returned value to have '0' as minimum.
+uint8_t maxVol = 11; // Reasonable value for constant volume for 'peak
+                     // detector', as it won't always trigger.
+bool samplePeak =
+    0; // Boolean flag for peak. Responding routine must reset this flag.
+int8_t thisdir = 1;
+
+// Fixed definitions cannot change on the fly.
+#define LED_DT 6 // Data pin to connect to the strip.
+#define LED_CK 11
+#define COLOR_ORDER GRB // It's GRB for WS2812B and BGR for APA102
+#define LED_TYPE                                                               \
+  WS2812 // What kind of strip are you using (WS2801, WS2812B or APA102)?
+#define NUM_LEDS 200 // Number of LED's.
+
+CRGBPalette16 currentPalette(OceanColors_p);
+CRGBPalette16 targetPalette(LavaColors_p);
+TBlendType currentBlending; // NOBLEND or LINEARBLEND
+
+static int16_t xdist; // A random number for our noise generator.
+static int16_t ydist;
+uint16_t xscale = 30;    // Wouldn't recommend changing this on the fly, or the
+                         // animation will be really blocky.
+uint16_t yscale = 30;    // Wouldn't recommend changing this on the fly, or the
+                         // animation will be really blocky.
+uint8_t maxChanges = 24; // Value for blending between palettes.
+
+int sampleAgc, multAgc;
+uint8_t targetAgc = 60;
+int avarage = 0;
 
 void setup() {
   pinMode(PIN_D_MUX_S0, OUTPUT);
   pinMode(PIN_D_MUX_S1, OUTPUT);
   pinMode(PIN_D_MUX_S2, OUTPUT);
   pinMode(PIN_D_MUX_S3, OUTPUT);
-  
+
   LEDS.addLeds<LED_TYPE, LED_DT, COLOR_ORDER>(leds,
                                               NUM_LEDS); // Use this for WS2812B
   FastLED.setBrightness(BRIGHTNESS);
@@ -140,6 +191,179 @@ void setup() {
   }
 }
 
+void getSample() {
+
+  int16_t micIn; // Current sample starts with negative values and large values,
+                 // which is why it's 16 bit signed.
+  static long peakTime;
+  digitalWrite(RESET, HIGH);
+  digitalWrite(RESET, LOW);
+  avarage = 0;
+  // Read all 8 Audio Bands
+  for (int i = 0; i < 8; i++) {
+    digitalWrite(STROBE, LOW);
+    delayMicroseconds(30);
+    spectrumValue[i] = analogRead(MSGEQ_OUT);
+    spectrumValue[i] = constrain(spectrumValue[i], filter, 1023);
+    if (i < 5)
+      spectrumValue[i] = int(spectrumValue[i] / 2.5);
+    else
+      spectrumValue[i] = int(spectrumValue[i] / 2.5);
+
+    digitalWrite(STROBE, HIGH);
+    mapValue[i] = map(spectrumValue[i], filter, 1023, 0, 255);
+    avarage += mapValue[i];
+  }
+  avarage = log(avarage) * 100;
+  mapValue[channel] = map(spectrumValue[channel], filter, 1023, 0, 255);
+  //  Serial.print(mapValue[4]);
+  //  Serial.print('\n');
+  micIn = 2 * mapValue[channel]; // Poor man's analog Read.
+  //   micIn = avarage; // Poor man's analog Read.
+  micLev =
+      ((micLev * 31) + micIn) /
+      32; // Smooth it out over the last 32 samples for automatic centering.
+  micIn -= micLev;    // Let's center it to 0 now.
+  micIn = abs(micIn); // And get the absolute value of each sample.
+  sample =
+      (micIn <= squelch)
+          ? 0
+          : (sample + micIn) /
+                2; // Using a ternary operator, the resultant sample is either 0
+                   // or it's a bit smoothed out with the last sample.
+  sampleAvg = ((sampleAvg * 31) + sample) /
+              32; // Smooth it out over the last 32 samples.
+
+  if (sample > (sampleAvg + maxVol) &&
+      millis() > (peakTime + 50)) { // Poor man's beat detection by seeing if
+                                    // sample > Average + some value.
+    samplePeak =
+        1; // Then we got a peak, else we don't. Display routines need to reset
+           // the samplepeak value in case they miss the trigger.
+    peakTime = millis();
+  }
+
+} // getSample()
+
+void agcAvg() { // A simple averaging multiplier to automatically adjust sound
+                // sensitivity.
+
+  multAgc = (sampleAvg < 1)
+                ? targetAgc
+                : targetAgc / sampleAvg; // Make the multiplier so that
+                                         // sampleAvg * multiplier = setpoint
+  sampleAgc = sample * multAgc;
+  if (sampleAgc > 255)
+    sampleAgc = 255;
+
+} // agcAvg()
+
+void pixels() {
+
+  // Local definitions
+
+  // Persistent local variables
+  static uint16_t
+      currLED; // Persistent local value to count the current LED location.
+
+  // Temporary local variables
+
+  currLED = (currLED + 1) %
+            (NUM_LEDS); // Cycle through all the LED's. By Andrew Tuline.
+
+  //  CRGB newcolour = ColorFromPalette(currentPalette, sin8(sample), 255,
+  //  currentBlending);   // Colour of the LED will be based on the sample,
+  //  while brightness is based on sampleavg. leds[currLED] = newcolour; //
+  //  Direct assignment of pixel colour.
+
+  leds[(millis() % (NUM_LEDS - 1)) + 1] =
+      ColorFromPalette(currentPalette, 255, 255, currentBlending);
+
+} // pixels()
+
+void plasma() {
+
+  // Local definitions
+
+  // Persistent local variables
+  static int16_t thisphase = 0; // Phase of a cubicwave8.
+  static int16_t thatphase = 0; // Phase of the cos8.
+
+  // Temporary local variables
+  uint16_t thisbright;
+  uint16_t colorIndex;
+
+  thisphase +=
+      beatsin8(6, -4, 4); // You can change direction and speed individually.
+  thatphase += beatsin8(
+      7, -4,
+      4); // Two phase values to make a complex pattern. By Andrew Tuline.
+
+  for (int k = 0; k < NUM_LEDS;
+       k++) { // For each of the LED's in the strand, set a brightness based on
+              // a wave as follows.
+    thisbright = cubicwave8((k * 8) + thisphase) / 2;
+    thisbright +=
+        cos8((k * 10) + thatphase) / 2; // Let's munge the brightness a bit and
+                                        // animate it all with the phases.
+    colorIndex = thisbright;
+    thisbright = qsuba(
+        thisbright,
+        255 - sampleAvg * 4); // qsuba chops off values below a threshold
+                              // defined by sampleAvg. Gives a cool effect.
+
+    //#define qsuba(x, b)  ((x>b)?x-b:0)                            // Unsigned
+    // subtraction macro. if result <0, then => 0.
+
+    leds[k] += ColorFromPalette(
+        currentPalette, colorIndex, thisbright,
+        currentBlending); // Let's now add the foreground colour.
+  }
+
+  fadeToBlackBy(leds, NUM_LEDS, 64);
+
+} // plasma()
+
+void cool() {
+  while (coolToggle) {
+    getControls();
+    coolToggle = S0;
+    pixelsToggle = RED0;
+    bool plasmaToggle = RED1;
+    checkBrightness();
+    EVERY_N_MILLISECONDS(10) {
+      uint8_t maxChanges = 24;
+      nblendPaletteTowardPalette(
+          currentPalette, targetPalette,
+          maxChanges); // AWESOME palette blending capability.
+      //    fillnoise8();                                             // Update
+      //    the LED array with noise based on sound input
+
+      //    fadeToBlackBy(leds, NUM_LEDS, 32);                         // 8 bit,
+      //    1 = slow, 255 = fast
+      fadeToBlackBy(leds, NUM_LEDS, 1); // 8 bit, 1 = slow, 255 = fast
+    }
+
+    EVERY_N_SECONDS(
+        5) { // Change the target palette to a random one every 5 seconds.
+      targetPalette = CRGBPalette16(CHSV(random8(), 255, random8(128, 255)),
+                                    CHSV(random8(), 255, random8(128, 255)),
+                                    CHSV(random8(), 192, random8(128, 255)),
+                                    CHSV(random8(), 255, random8(128, 255)));
+    }
+
+    getSample(); // Sample the sound.
+    agcAvg();
+    //  fadeToBlackBy(leds, NUM_LEDS, 32);
+    if (pixelsToggle)
+      pixels();
+
+    if (plasmaToggle)
+      plasma();
+    FastLED.show(); // Display everything.
+  }
+}
+
 void rainbow(int x) {
   static int values[3];
   int _r = 0;
@@ -162,15 +386,56 @@ void rainbow(int x) {
   colors[0] = _r;
   colors[1] = _g;
   colors[2] = _b;
-  //  Serial.print(r);
-  //  Serial.print('\n');
-  return values;
+}
+
+boolean checkBrightness() {
+  // WS2812 takes value between 0-255
+  uint16_t bright =
+      map(constrain(analogRead(POT_BRIGHTNESS), 0, 1024), 0, 1024, 256, 9);
+  if (abs(bright - brightness) > 10) {
+    brightness = bright;
+    FastLED.setBrightness(brightness);
+    return true;
+  }
+  return false;
+}
+
+int readMux(int channel) {
+  int controlPin[] = {PIN_D_MUX_S0, PIN_D_MUX_S1, PIN_D_MUX_S2, PIN_D_MUX_S3};
+
+  int muxChannel[16][4] = {
+      {0, 0, 0, 0}, // channel 0
+      {1, 0, 0, 0}, // channel 1
+      {0, 1, 0, 0}, // channel 2
+      {1, 1, 0, 0}, // channel 3
+      {0, 0, 1, 0}, // channel 4
+      {1, 0, 1, 0}, // channel 5
+      {0, 1, 1, 0}, // channel 6
+      {1, 1, 1, 0}, // channel 7
+      {0, 0, 0, 1}, // channel 8
+      {1, 0, 0, 1}, // channel 9
+      {0, 1, 0, 1}, // channel 10
+      {1, 1, 0, 1}, // channel 11
+      {0, 0, 1, 1}, // channel 12
+      {1, 0, 1, 1}, // channel 13
+      {0, 1, 1, 1}, // channel 14
+      {1, 1, 1, 1}  // channel 15
+  };
+
+  // loop through the 4 sig
+  for (int i = 0; i < 4; i++) {
+    digitalWrite(controlPin[i], muxChannel[channel][i]);
+  }
+
+  // read the value at the SIG pin
+  int val = analogRead(PIN_A_MUX_SIG);
+
+  // return the value
+  return val;
 }
 
 void getControls() {
   for (byte i = 0; i < MUX_CH_COUNT; i++) {
-    PORTB = (PORTB & B11110000) | i;
-    short val = analogRead(PIN_A_MUX_SIG);
     // "val" holds the value for input "i", so you can insert your custom code
     // here.
 
@@ -180,17 +445,18 @@ void getControls() {
     //   Serial.print(val);
     //   Serial.print(" | ");
     //   Serial.println("");
+    int val = readMux(i);
     if (i == 0) {
       if (val > 900)
-        allLedsToggle = true;
+        RED0 = true;
       else
-        allLedsToggle = false;
+        RED0 = false;
     }
     if (i == 1) {
       if (val > 900)
-        StrobeAllToggle = true;
+        RED1 = true;
       else
-        StrobeAllToggle = false;
+        RED1 = false;
     }
     if (i == 8) {
       if (val > 900)
@@ -203,6 +469,12 @@ void getControls() {
         ON_OFF = true;
       else
         ON_OFF = false;
+    }
+    if (i == 10) {
+      if (val > 900)
+        S0 = true;
+      else
+        S0 = false;
     }
     if (i == 14) {
       if (val > 900)
@@ -231,36 +503,11 @@ void StrobeAll() {
   STROBE_DELAY = map(constrain(analogRead(A3), 0, 1024), 0, 1024, 0, 50);
   fill_solid(leds, NUM_LEDS, CRGB(temp_r, temp_g, temp_b));
   FastLED.show();
-  delay(STROBE_DELAY * 10);
+  delay(1);
   fill_solid(leds, NUM_LEDS, CRGB(0, 0, 0));
   FastLED.show();
   delay(STROBE_DELAY * 10);
 }
-
-void loop() {
-  getControls();
-  if (musicAnalyzerToggle)
-    musicAnalyzer();
-  if (allLedsToggle)
-    allLeds();
-  if (StrobeAllToggle)
-    StrobeAll();
-}
-#if USES_POTENTIOMETER
-/* Checks if Potentiometer value has changed, sets new Brightness and return
- * true */
-boolean checkBrightness() {
-  // WS2812 takes value between 0-255
-  uint16_t bright =
-      map(constrain(analogRead(POT_BRIGHTNESS), 0, 1024), 0, 1024, 10, 255);
-  if (abs(bright - brightness) > 10) {
-    brightness = bright;
-    FastLED.setBrightness(brightness);
-    return true;
-  }
-  return false;
-}
-#endif
 
 void musicAnalyzer() {
   while (musicAnalyzerToggle) {
@@ -340,6 +587,11 @@ void musicAnalyzer() {
         power = int(((mapValue[channel] - average) / 8.f));
         //        power = int(((mapValue[channel] - average) / (average
         //        / 7.f)));
+        if(blinking){
+            if(power>20){
+                power = 20;
+            }
+        }
         move_pixel += power;
         last_value = mapValue[channel];
       } else if (int(mapValue[channel]) > 6) {
@@ -392,16 +644,16 @@ void musicAnalyzer() {
         r1 = colors[0];
         g1 = colors[1];
         b1 = colors[2];
-            //    if (blinking ) {
-            //      //   if ((int(mapValue[channel]) < average * 1.2 or
-            //      //       int(mapValue[channel]) < 10) and dupa_blink) {
-            //      if (abs(pixel_average) * 1.1 < move_pixel ) {
-            //        r1 = 0;
-            //        g1 = 0;
-            //        b1 = 0;
-            //        // dupa_blink = not dupa_blink;
-            //      }
-            //    }
+        //    if (blinking ) {
+        //      //   if ((int(mapValue[channel]) < average * 1.2 or
+        //      //       int(mapValue[channel]) < 10) and dupa_blink) {
+        //      if (abs(pixel_average) * 1.1 < move_pixel ) {
+        //        r1 = 0;
+        //        g1 = 0;
+        //        b1 = 0;
+        //        // dupa_blink = not dupa_blink;
+        //      }
+        //    }
         rainbow(counter + 128);
         r2 = colors[0];
         g2 = colors[1];
@@ -411,19 +663,19 @@ void musicAnalyzer() {
           g2 = 0;
           b2 = 0;
         }
-            //    if (blinking ) {
-            //      //   if ((int(mapValue[channel]) < average * 1.2 or
-            //      //       int(mapValue[channel]) < 10 ) and not dupa_blink) {
-            //      if (abs(pixel_average) * 1.1 < move_pixel) {
-            //        r2 = 0;
-            //        g2 = 0;
-            //        b2 = 0;
-            //        //             r2 = colors[0];
-            //        // g2 = colors[1];
-            //        // b2 = colors[2];
-            //        // dupa_blink = not dupa_blink;
-            //      }
-            //    }
+        //    if (blinking ) {
+        //      //   if ((int(mapValue[channel]) < average * 1.2 or
+        //      //       int(mapValue[channel]) < 10 ) and not dupa_blink) {
+        //      if (abs(pixel_average) * 1.1 < move_pixel) {
+        //        r2 = 0;
+        //        g2 = 0;
+        //        b2 = 0;
+        //        //             r2 = colors[0];
+        //        // g2 = colors[1];
+        //        // b2 = colors[2];
+        //        // dupa_blink = not dupa_blink;
+        //      }
+        //    }
       }
       dupa_blink = not dupa_blink;
       if (not blinking and brightness_variant) {
@@ -437,8 +689,8 @@ void musicAnalyzer() {
         g = 0;
         b = 0;
       }
-      if (move_pixel < 0)
-        move_pixel = 0;
+      //   if (move_pixel < 0)
+      //     move_pixel = 0;
       move_pixel += 0.5;
       Serial.print(power);
       Serial.print('\n');
@@ -450,8 +702,8 @@ void musicAnalyzer() {
       }
 
       border = Value;
-      if (border < 0)
-        border = 0;
+      //   if (border < 0)
+      //     border = 0;
       DoubleLastValue = LastValue;
       LastValue = Value;
       border = Value;
@@ -521,3 +773,23 @@ void musicAnalyzer() {
     }
   }
 }
+
+void loop() {
+  getControls();
+  allLedsToggle = RED0;
+  coolToggle = S0;
+  StrobeAllToggle = RED1;
+  if (musicAnalyzerToggle)
+    musicAnalyzer();
+  if (allLedsToggle)
+    allLeds();
+  if (StrobeAllToggle)
+    StrobeAll();
+  if (coolToggle)
+    cool();
+}
+#if USES_POTENTIOMETER
+/* Checks if Potentiometer value has changed, sets new Brightness and return
+ * true */
+
+#endif
