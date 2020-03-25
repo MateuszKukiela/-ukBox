@@ -1,7 +1,4 @@
 #include "FastLED.h"
-//#ifdef __AVR__
-//#include <avr/power.h>
-//#endif
 
 /** THIS SKETCH HAS ONLY GOT THE ADUIO VISUALIZER MODE USING THE MSGEQ7
     FOR OTHER MODES SEE THE "RGBStripe_Control_WS2812.ino SKETCH        **/
@@ -33,8 +30,15 @@
 #define PIN_D_MUX_S3 11 // bit 4 of PORTB
 #define PIN_A_MUX_SIG 0 // This pin will read the input from the mux.
 
+#define FRAMES_PER_SECOND 120
+
 // Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_LEDS, LED_DATA, NEO_GRB +
 // NEO_KHZ800);
+unsigned long time = 0;
+unsigned long time_last = 0;
+int pattern_time_my = 0;
+
+int pattern = 0;
 int encoderVal = 4;
 float last_value = 0;
 uint16_t brightness = BRIGHTNESS;
@@ -82,6 +86,7 @@ int last_move_pixel = 0;
 float move_pixel_delta = 0;
 bool ON_OFF = false;
 bool one_color = false;
+bool rave_mode = false;
 
 int readings[numReadings]; // the readings from the analog input
 int readIndex = 0;         // the index of the current reading
@@ -96,6 +101,7 @@ float pixel_average = 0;                 // the average
 
 uint16_t audioBuffer[NUM_LEDS];
 int filter = 0;
+uint8_t gHue = 0; // rotating "base color" used by many of the patterns
 
 struct CRGB leds[NUM_LEDS]; // Initialize our LED array.
 
@@ -107,10 +113,22 @@ int STROBE_DELAY = 0;
 bool StrobeAllToggle = false;
 bool coolToggle = true;
 bool pixelsToggle = false;
+float gain = 8;
 
 bool RED0 = false;
 bool RED1 = false;
+bool RED2 = false;
+bool RED3 = false;
+bool RED4 = false;
+bool RED5 = false;
+bool RED6 = false;
+bool RED7 = false;
+bool RED8 = false;
 bool S0 = false;
+bool S1 = false;
+bool S2 = false;
+bool S3 = false;
+bool S4 = false;
 // ------------------------------------
 #define qsubd(x, b)                                                            \
   ((x > b) ? b : 0) // Digital unsigned subtraction macro. if result <0, then =>
@@ -119,7 +137,6 @@ bool S0 = false;
   ((x > b) ? x - b                                                             \
            : 0) // Analog Unsigned subtraction macro. if result <0, then => 0
 #define FASTLED_ALLOW_INTERRUPTS 0 // Used for ESP8266.
-#include "FastLED.h"               // FastLED library.
 
 #define MIC_PIN 5 // Analog port for microphone
 uint8_t squelch =
@@ -216,10 +233,9 @@ void getSample() {
   }
   avarage = log(avarage) * 100;
   mapValue[channel] = map(spectrumValue[channel], filter, 1023, 0, 255);
-  //  Serial.print(mapValue[4]);
-  //  Serial.print('\n');
   micIn = 2 * mapValue[channel]; // Poor man's analog Read.
-  //   micIn = avarage; // Poor man's analog Read.
+  if (channel == 9)
+    micIn = avarage; // Poor man's analog Read.
   micLev =
       ((micLev * 31) + micIn) /
       32; // Smooth it out over the last 32 samples for automatic centering.
@@ -271,13 +287,13 @@ void pixels() {
   currLED = (currLED + 1) %
             (NUM_LEDS); // Cycle through all the LED's. By Andrew Tuline.
 
-  //  CRGB newcolour = ColorFromPalette(currentPalette, sin8(sample), 255,
+  //  CRGB newcolour = ColorFromPalette(currentPalette, sin8(sample), sampleAgc,
   //  currentBlending);   // Colour of the LED will be based on the sample,
-  //  while brightness is based on sampleavg. leds[currLED] = newcolour; //
-  //  Direct assignment of pixel colour.
+  //  while brightness is based on sampleavg. leds[currLED] = newcolour;
+  //  // Direct assignment of pixel colour.
 
   leds[(millis() % (NUM_LEDS - 1)) + 1] =
-      ColorFromPalette(currentPalette, 255, 255, currentBlending);
+      ColorFromPalette(currentPalette, sampleAgc, sampleAgc, currentBlending);
 
 } // pixels()
 
@@ -324,12 +340,320 @@ void plasma() {
 
 } // plasma()
 
+void jugglep() { // Use the juggle routine, but adjust the timebase based on
+                 // sampleAvg for some randomness.
+
+  // Local definitions
+
+  // Persistent local variables
+  static int thistime = 20; // Time shifted value keeps changing thus
+                            // interrupting the juggle pattern.
+
+  // Temporary local variables
+
+  fadeToBlackBy(leds, NUM_LEDS, 1); // Fade the strand.
+
+  leds[beatsin16(thistime, 0, NUM_LEDS - 1, 0, 0)] += ColorFromPalette(
+      currentPalette, millis() / 4, sampleAgc, currentBlending);
+  leds[beatsin16(thistime - 3, 0, NUM_LEDS - 1, 0, 0)] += ColorFromPalette(
+      currentPalette, millis() / 4, sampleAgc, currentBlending);
+
+  EVERY_N_MILLISECONDS(250) {
+    thistime = sampleAvg /
+               2; // Change the beat frequency every 250 ms. By Andrew Tuline.
+  }
+
+} // jugglep()
+
+void noisewide() {
+
+  // Local definitions
+#define GRAVITY 5
+
+  // Persistent local variables
+  static uint8_t topLED;
+  static int gravityCounter = 0;
+
+  // Temporary local variables
+  uint8_t tempsamp = constrain(
+      sampleAvg, 0, NUM_LEDS / 2 - 1); // Keep the sample from overflowing.
+
+  fadeToBlackBy(leds, NUM_LEDS, 160);
+
+  for (int i = 0; i < tempsamp; i++) {
+    uint8_t index = inoise8(i * sampleAvg + millis(), 5000 + i * sampleAvg * 2);
+    leds[NUM_LEDS / 2 - i] =
+        ColorFromPalette(currentPalette, index, sampleAvg * 2, currentBlending);
+    leds[NUM_LEDS / 2 + i] =
+        ColorFromPalette(currentPalette, index, sampleAvg * 2, currentBlending);
+  }
+
+  if (tempsamp >= topLED)
+    topLED = tempsamp;
+  else if (gravityCounter % GRAVITY == 0)
+    topLED--;
+
+  if (topLED > 0) {
+    leds[NUM_LEDS / 2 - topLED] =
+        ColorFromPalette(currentPalette, millis(), 255,
+                         LINEARBLEND); // LED falls when the volume goes down.
+    leds[topLED + NUM_LEDS / 2] =
+        ColorFromPalette(currentPalette, millis(), 255,
+                         LINEARBLEND); // LED falls when the volume goes down.
+  }
+
+  gravityCounter = (gravityCounter + 1) % GRAVITY;
+
+} // noisewide()
+
+void onesine() {
+
+  // Local definitions
+
+  // Persistent local variable.
+  static int thisphase = 0; // Phase change value gets calculated.
+
+  // Temporary local variables
+  uint8_t allfreq = 20; // You can change the frequency, thus distance between
+                        // bars. Wouldn't recommend changing on the fly.
+  uint8_t thiscutoff;   // You can change the cutoff value to display this wave.
+                        // Lower value = longer wave.
+
+  thiscutoff = 255 - sampleAgc;
+
+  thisphase +=
+      sampleAvg / 6 +
+      beatsin16(20, -10, 10); // Move the sine waves along as a function of
+                              // sound plus a bit of sine wave.
+
+  for (int k = 0; k < NUM_LEDS;
+       k++) { // For each of the LED's in the strand, set a brightness based on
+              // a wave as follows:
+    int thisbright =
+        qsubd(cubicwave8((k * allfreq) + thisphase),
+              thiscutoff); // qsub sets a minimum value called thiscutoff. If <
+                           // thiscutoff, then bright = 0. Otherwise, bright =
+                           // 128 (as defined in qsub)..
+
+    leds[k] = ColorFromPalette(currentPalette, millis() / 2, thisbright,
+                               currentBlending); // Let's now add the foreground
+                                                 // colour. By Andrew Tuline.
+  }
+
+} // onesine()
+
+void sinephase() {
+
+  // Local definitions
+
+  // Persistent local variables
+
+  // Temporary local variables
+
+  for (int i = 0; i < NUM_LEDS; i++) {
+
+    int hue = sampleAvg * 2 + sin8(i * 4 + beatsin16(13, -20, 50));
+    int bri = hue;
+    bri = bri * bri / 255;
+    leds[i] = ColorFromPalette(currentPalette, hue, bri, currentBlending);
+  }
+
+} // sinephase()
+
+void fillnoise() { // Another perlin noise based routine.
+
+  // Local definitions
+#define xscale 160
+#define yscale 160
+
+  // Persistent local variables
+  static int16_t xdist; // A random number for our noise generator.
+  static int16_t ydist;
+
+  // Temporary local variables
+
+  if (sampleAvg > NUM_LEDS)
+    sampleAvg = NUM_LEDS; // Clip the sampleAvg to maximize at NUM_LEDS.
+
+  for (int i = (NUM_LEDS - sampleAvg / 2) / 2;
+       i < (NUM_LEDS + sampleAvg / 2) / 2;
+       i++) { // The louder the sound, the wider the soundbar.
+    uint8_t index = inoise8(
+        i * sampleAvg * 8 + xdist,
+        ydist + i * sampleAvg * 8); // Get a value from the noise function. I'm
+                                    // using both x and y axis.
+
+    leds[i] = ColorFromPalette(
+        currentPalette, index, sampleAgc * 3,
+        LINEARBLEND); // With that value, look up the 8 bit colour palette value
+                      // and assign it to the current LED.
+  } // Effect is a NOISE bar the width of sampleAvg. Very fun. By Andrew Tuline.
+
+  xdist += beatsin8(
+      5, 0, 3); // Moving forward in the NOISE field, but with a sine motion.
+  ydist += beatsin8(
+      4, 0, 3); // Moving sideways in the NOISE field, but with a sine motion.
+
+  waveit(); // Move the pixels to the left/right, but not too fast.
+
+  fadeToBlackBy(
+      leds + NUM_LEDS / 2 - 1, 2,
+      64); // Fade the center, while waveit moves everything out to the edges.
+
+} // fillnoise()
+
+void matrix() { // A 'Matrix' like display using sampleavg for brightness.
+
+  // Local definitions
+
+  // Persistent local variables
+
+  // Temporary local variables
+
+  if (thisdir == 1) {
+    leds[0] = ColorFromPalette(currentPalette, millis(), sampleAgc * 100,
+                               currentBlending);
+  } else {
+    leds[NUM_LEDS - 1] = ColorFromPalette(currentPalette, millis(),
+                                          sampleAgc * 100, currentBlending);
+  }
+
+  if (thisdir == 1) {
+    for (int i = NUM_LEDS - 1; i > 0; i--)
+      leds[i] = leds[i - 1];
+  } else {
+    for (int i = 0; i < 10; i++)
+      leds[i] = leds[i + 1];
+  }
+}
+
+void ripple() { // Display ripples triggered by peaks.
+
+  // Local definitions
+#define maxsteps 16 // Maximum number of steps.
+
+  // Persistent local variables
+  static uint8_t colour;      // Ripple colour is based on samples.
+  static uint16_t center = 0; // Center of current ripple.
+  static int8_t step = -1;    // Phase of the ripple as it spreads out.
+
+  // Temporary local variables
+
+  if (samplePeak) {
+    samplePeak = 0;
+    step = -1;
+  } // Trigger a new ripple if we have a peak.
+
+  fadeToBlackBy(leds, NUM_LEDS,
+                64); // Fade the strand, where 1 = slow, 255 = fast
+
+  switch (step) {
+
+  case -1: // Initialize ripple variables. By Andrew Tuline.
+    center = random(NUM_LEDS);
+    colour = (sample) % 255; // More peaks/s = higher the hue colour.
+    step = 0;
+    break;
+
+  case 0:
+    leds[center] += ColorFromPalette(
+        currentPalette, colour + millis(), 255,
+        currentBlending); // Display the first pixel of the ripple.
+    step++;
+    break;
+
+  case maxsteps: // At the end of the ripples.
+    // step = -1;
+    break;
+
+  default: // Middle of the ripples.
+
+    leds[(center + step + NUM_LEDS) % NUM_LEDS] += ColorFromPalette(
+        currentPalette, colour + millis(), 255 / step * 2,
+        currentBlending); // A spreading and fading pattern up the strand.
+    leds[(center - step + NUM_LEDS) % NUM_LEDS] += ColorFromPalette(
+        currentPalette, colour + millis(), 255 / step * 2,
+        currentBlending); // A spreading and fading pattern down the strand.
+    step++;               // Next step.
+    break;
+
+  } // switch step
+
+} // ripple()
+
+void rainbowpeak() {
+
+  // Local definitions
+
+  // Persistent local variables
+
+  // Temporary local variables
+  uint8_t beatA = beatsin8(17, 0, 255); // Starting hue.
+
+  if (samplePeak) { // Trigger a rainbow with a peak.
+
+    samplePeak = 0; // Got a peak, now reset it.
+
+    uint8_t locn = random8(0, NUM_LEDS);
+    fill_rainbow(leds + locn, random8(0, (NUM_LEDS - locn)), beatA, 8);
+  }
+
+  fadeToBlackBy(leds, NUM_LEDS, 40); // Fade everything. By Andrew Tuline.
+
+} // rainbowpeak()
+
+void myvumeter() { // A vu meter. Grabbed the falling LED from Reko MeriÃ¶.
+
+  // Local definitions
+#define GRAVITY 2
+
+  // Persistent local variables
+  static uint8_t topLED;
+  static int gravityCounter = 0;
+
+  // Temporary local variables
+  uint8_t tempsamp = constrain(
+      sampleAvg * 5, 0, NUM_LEDS - 1); // Keep the sample from overflowing.
+
+  fadeToBlackBy(leds, NUM_LEDS, 20);
+
+  for (int i = 0; i < tempsamp; i++) {
+    uint8_t index =
+        inoise8(i * 2 * sampleAvg + millis(), 5000 + i * 2 * sampleAvg);
+    leds[i] = ColorFromPalette(currentPalette, index, sampleAvg * 8,
+                               currentBlending);
+  }
+
+  if (tempsamp >= topLED)
+    topLED = tempsamp;
+  else if (gravityCounter % GRAVITY == 0)
+    topLED--;
+
+  if (topLED > 0) {
+    leds[topLED] =
+        ColorFromPalette(currentPalette, millis(), 255,
+                         LINEARBLEND); // LED falls when the volume goes down.
+  }
+
+  gravityCounter = (gravityCounter + 1) % GRAVITY;
+
+} // myvumeter()
+
 void cool() {
+  channel = 9;
   while (coolToggle) {
     getControls();
+    getGain();
+
     coolToggle = S0;
     pixelsToggle = RED0;
     bool plasmaToggle = RED1;
+    bool rippleToggle = RED2;
+    bool jugglepToggle = RED3;
+    bool noisewideToogle = RED4;
+    bool sinephaseToggle = RED5;
+    bool onesineToggle = RED6;
+    bool fillnoiseToggle = RED7;
     checkBrightness();
     EVERY_N_MILLISECONDS(10) {
       uint8_t maxChanges = 24;
@@ -360,7 +684,140 @@ void cool() {
 
     if (plasmaToggle)
       plasma();
+
+    if (rippleToggle)
+      ripple();
+
+    if (jugglepToggle)
+      jugglep();
+
+    if (noisewideToogle)
+      noisewide();
+
+    if (sinephaseToggle)
+      sinephase();
+
+    if (onesineToggle)
+      onesine();
+
+    if (fillnoiseToggle)
+      fillnoise();
+
+    if (RED8)
+      rainbowpeak();
+
+    if (S3)
+      setChannel();
+
     FastLED.show(); // Display everything.
+  }
+}
+
+void rainbow_non_music() {
+  // FastLED's built-in rainbow generator
+  fill_rainbow(leds, NUM_LEDS, gHue, 7);
+}
+
+void confetti() {
+  // random colored speckles that blink in and fade smoothly
+  fadeToBlackBy(leds, NUM_LEDS, 10);
+  int pos = random16(NUM_LEDS);
+  leds[pos] += CHSV(gHue + random8(64), 200, 255);
+}
+
+void sinelon() {
+  // a colored dot sweeping back and forth, with fading trails
+  fadeToBlackBy(leds, NUM_LEDS, 20);
+  int pos = beatsin16(13, 0, NUM_LEDS - 1);
+  leds[pos] += CHSV(gHue, 255, 192);
+}
+
+void bpm() {
+  // colored stripes pulsing at a defined Beats-Per-Minute (BPM)
+  uint8_t BeatsPerMinute = 62;
+  CRGBPalette16 palette = PartyColors_p;
+  uint8_t beat = beatsin8(BeatsPerMinute, 64, 255);
+  for (int i = 0; i < NUM_LEDS; i++) { // 9948
+    leds[i] = ColorFromPalette(palette, gHue + (i * 2), beat - gHue + (i * 10));
+  }
+}
+
+void juggle() {
+  // eight colored dots, weaving in and out of sync with each other
+  fadeToBlackBy(leds, NUM_LEDS, 20);
+  byte dothue = 0;
+  for (int i = 0; i < 8; i++) {
+    leds[beatsin16(i + 7, 0, NUM_LEDS - 1)] |= CHSV(dothue, 200, 255);
+    dothue += 32;
+  }
+}
+
+void animations() {
+  while (S2) {
+    getControls();
+    checkBrightness();
+    float gHue_step = map(constrain(analogRead(A3), 0, 1024), 0, 1024, 8, -1);
+    EVERY_N_MILLISECONDS(20) {
+      gHue += gHue_step;
+    } // slowly cycle the "base color" through the rainbow
+    while (RED0) {
+      getControls();
+      pattern_time_my =
+          map(constrain(analogRead(A4), 0, 1024), 0, 1024, 100, 0);
+      Serial.print(pattern_time_my);
+      Serial.print('\n');
+      EVERY_N_MILLISECONDS(20) { gHue += 2; }
+      if (millis() - time_last > 1000 * pattern_time_my) {
+        time_last = millis();
+        pattern += 1;
+      }
+      if (pattern > 3)
+        pattern = 0;
+      switch (pattern) {
+      case 0:
+        rainbow_non_music();
+        break;
+      case 1:
+        confetti();
+        break;
+      case 2:
+        sinelon();
+        break;
+      case 3:
+        juggle();
+        break;
+      }
+      FastLED.show();
+    }
+    if (RED1)
+      rainbow_non_music();
+    if (RED2)
+      confetti();
+    if (RED3)
+      sinelon();
+    if (RED4)
+      bpm();
+    if (RED5)
+      juggle();
+    // send the 'leds' array out to the actual LED strip
+    FastLED.show();
+    // insert a delay to keep the framerate modest
+    FastLED.delay(1000 / FRAMES_PER_SECOND);
+  }
+}
+
+void getGain() {
+  gain = map(constrain(analogRead(A4), 0, 1024), 0, 1024, 0, 9);
+}
+
+void setChannel() {
+  fadeToBlackBy(leds, NUM_LEDS, 64);
+  channel = map(constrain(analogRead(A7), 0, 1024), 0, 1024, 9, 0);
+  for (byte i = 0; i < 3 * channel; i++) {
+    if (i % 3 == 0)
+      leds[NUM_LEDS / 2 + i].setRGB(0, 0, 0);
+    else
+      leds[NUM_LEDS / 2 + i] = CRGB::HotPink;
   }
 }
 
@@ -458,11 +915,47 @@ void getControls() {
       else
         RED1 = false;
     }
+    if (i == 2) {
+      if (val > 900)
+        RED2 = true;
+      else
+        RED2 = false;
+    }
+    if (i == 3) {
+      if (val > 900)
+        RED3 = true;
+      else
+        RED3 = false;
+    }
+    if (i == 4) {
+      if (val > 900)
+        RED4 = true;
+      else
+        RED4 = false;
+    }
+    if (i == 5) {
+      if (val > 900)
+        RED5 = true;
+      else
+        RED5 = false;
+    }
+    if (i == 6) {
+      if (val > 900)
+        RED6 = true;
+      else
+        RED6 = false;
+    }
+    if (i == 7) {
+      if (val > 900)
+        RED7 = true;
+      else
+        RED7 = false;
+    }
     if (i == 8) {
       if (val > 900)
-        musicAnalyzerToggle = true;
+        RED8 = true;
       else
-        musicAnalyzerToggle = false;
+        RED8 = false;
     }
     if (i == 9) {
       if (val > 900)
@@ -476,47 +969,80 @@ void getControls() {
       else
         S0 = false;
     }
+    if (i == 11) {
+      if (val > 900)
+        S1 = true;
+      else
+        S1 = false;
+    }
+    if (i == 12) {
+      if (val > 900)
+        S2 = true;
+      else
+        S2 = false;
+    }
     if (i == 14) {
       if (val > 900)
-        one_color = true;
+        S3 = true;
       else
-        one_color = false;
+        S3 = false;
     }
     if (i == 15) {
       if (val > 900)
-        blinking = true;
+        S4 = true;
       else
-        blinking = false;
+        S4 = false;
     }
   }
 }
 
 void allLeds() {
-  temp_r = map(constrain(analogRead(A3), 0, 1024), 0, 1024, 254, -1);
-  temp_g = map(constrain(analogRead(A4), 0, 1024), 0, 1024, 254, -1);
-  temp_b = map(constrain(analogRead(A5), 0, 1024), 0, 1024, 254, -1);
-  fill_solid(leds, NUM_LEDS, CRGB(temp_r, temp_g, temp_b));
-  FastLED.show();
+  while (RED0) {
+    getControls();
+    checkBrightness();
+    temp_r = map(constrain(analogRead(A3), 0, 1024), 0, 1024, 254, -1);
+    temp_g = map(constrain(analogRead(A4), 0, 1024), 0, 1024, 254, -1);
+    temp_b = map(constrain(analogRead(A5), 0, 1024), 0, 1024, 254, -1);
+    fill_solid(leds, NUM_LEDS, CRGB(temp_r, temp_g, temp_b));
+    FastLED.show();
+  }
 }
 
 void StrobeAll() {
-  STROBE_DELAY = map(constrain(analogRead(A3), 0, 1024), 0, 1024, 0, 50);
-  fill_solid(leds, NUM_LEDS, CRGB(temp_r, temp_g, temp_b));
-  FastLED.show();
-  delay(1);
-  fill_solid(leds, NUM_LEDS, CRGB(0, 0, 0));
-  FastLED.show();
-  delay(STROBE_DELAY * 10);
+  while (RED1) {
+    getControls();
+    checkBrightness();
+    STROBE_DELAY = map(constrain(analogRead(A3), 0, 1024), 0, 1024, 0, 50);
+    fill_solid(leds, NUM_LEDS, CRGB(temp_r, temp_g, temp_b));
+    FastLED.show();
+    delay(1);
+    fill_solid(leds, NUM_LEDS, CRGB(0, 0, 0));
+    FastLED.show();
+    delay(STROBE_DELAY * 10);
+  }
 }
 
 void musicAnalyzer() {
+  move_pixel = 0;
+  move_pixel_average = 0;
+  power = 0;
+  counter = 0;
+  channel = 4;
+  divide = 1;
+  gain = 8;
   while (musicAnalyzerToggle) {
+    musicAnalyzerToggle = S1;
     getControls();
+    rave_mode = RED0;
+    if (RED3)
+      getGain();
+    else
+      gain = 8;
+
     encoderVal =
-        map(constrain(analogRead(POT_DIVIDE), 0, 1024), 0, 1024, 1, 40);
+        map(constrain(analogRead(POT_DIVIDE), 0, 1024), 0, 1024, 10, -1);
     if (NUM_LEDS % encoderVal == 0 and encoderVal % 2 == 0 or encoderVal == 1)
       divide = encoderVal;
-    //    Serial.print(encoderVal);
     factor = NUM_LEDS / divide;
 
     if (ON_OFF == false) {
@@ -524,9 +1050,8 @@ void musicAnalyzer() {
       FastLED.show();
     } else {
       FastLED.setBrightness(brightness);
-#if USES_POTENTIOMETER
-      checkBrightness();
-#endif
+
+      blinking = RED1;
       // Reset MSGEQ
       digitalWrite(RESET, HIGH);
       digitalWrite(RESET, LOW);
@@ -562,7 +1087,6 @@ void musicAnalyzer() {
         // ...wrap around to the beginning:
         readIndex = 0;
       }
-
       // calculate the average:
       average = total / numReadings;
       // Shift LED values forward
@@ -584,13 +1108,13 @@ void musicAnalyzer() {
       audioBuffer[0] |= (mapValue[4] / 4);        // BLUE
       if (int(mapValue[channel]) > average * 0.5 and
           int(mapValue[channel]) > 10) {
-        power = int(((mapValue[channel] - average) / 8.f));
+        power = int(((mapValue[channel] - average) / gain));
         //        power = int(((mapValue[channel] - average) / (average
         //        / 7.f)));
-        if(blinking){
-            if(power>20){
-                power = 20;
-            }
+        if (blinking) {
+          if (power > 20) {
+            power = 20;
+          }
         }
         move_pixel += power;
         last_value = mapValue[channel];
@@ -620,7 +1144,16 @@ void musicAnalyzer() {
         // ...wrap around to the beginning:
         pixel_readIndex = 0;
       }
-
+      if (not rave_mode)
+        checkBrightness();
+      else {
+        // if (int(mapValue[channel]) < average * 1.1 or
+        //     int(mapValue[channel]) < 10)
+        if (int(mapValue[channel]) > average * 1.1 and
+            int(mapValue[channel]) > 10)
+          FastLED.setBrightness(0);
+        counter += mapValue[channel] / 10;
+      }
       // calculate the average:
       pixel_average = pixel_total / pixel_numReadings;
       if (skip_green) {
@@ -635,10 +1168,6 @@ void musicAnalyzer() {
           b = temp_b + 55;
           r = 255 - temp_b;
         }
-        Serial.print(b);
-        Serial.print('\n');
-        Serial.print(r);
-        Serial.print('\n');
       } else {
         rainbow(counter);
         r1 = colors[0];
@@ -658,6 +1187,7 @@ void musicAnalyzer() {
         r2 = colors[0];
         g2 = colors[1];
         b2 = colors[2];
+        one_color = not RED2;
         if (one_color) {
           r2 = 0;
           g2 = 0;
@@ -689,11 +1219,9 @@ void musicAnalyzer() {
         g = 0;
         b = 0;
       }
-      //   if (move_pixel < 0)
-      //     move_pixel = 0;
+      if (move_pixel < 0)
+        move_pixel = 0;
       move_pixel += 0.5;
-      Serial.print(power);
-      Serial.print('\n');
 
       Value = (abs(int(move_pixel)) % int(factor));
 
@@ -702,8 +1230,8 @@ void musicAnalyzer() {
       }
 
       border = Value;
-      //   if (border < 0)
-      //     border = 0;
+      if (border < 0)
+        border = 0;
       DoubleLastValue = LastValue;
       LastValue = Value;
       border = Value;
@@ -767,7 +1295,8 @@ void musicAnalyzer() {
         leds[i].green = temp_g;
         leds[i].blue = temp_b;
       }
-
+      if (S3)
+        setChannel();
       FastLED.show();
       delay(DELAY);
     }
@@ -779,17 +1308,56 @@ void loop() {
   allLedsToggle = RED0;
   coolToggle = S0;
   StrobeAllToggle = RED1;
+  musicAnalyzerToggle = S1;
   if (musicAnalyzerToggle)
     musicAnalyzer();
-  if (allLedsToggle)
+  else if (allLedsToggle)
     allLeds();
-  if (StrobeAllToggle)
+  else if (StrobeAllToggle)
     StrobeAll();
-  if (coolToggle)
+  else if (coolToggle)
     cool();
+  else if (S2)
+    animations();
+  else {
+    fill_solid(leds, NUM_LEDS, CRGB(0, 0, 0));
+    FastLED.show();
+  }
 }
 #if USES_POTENTIOMETER
 /* Checks if Potentiometer value has changed, sets new Brightness and return
  * true */
 
 #endif
+
+void addGlitter(fract8 chanceOfGlitter) { // Let's add some glitter
+
+  if (random8() < chanceOfGlitter) {
+    leds[random16(NUM_LEDS)] += CRGB::White;
+  }
+
+} // addGlitter()
+
+void lineit() { // Send the pixels one or the other direction down the line.
+
+  if (thisdir == 0) {
+    for (int i = NUM_LEDS - 1; i > 0; i--)
+      leds[i] = leds[i - 1];
+  } else {
+    for (int i = 0; i < NUM_LEDS - 1; i++)
+      leds[i] = leds[i + 1];
+  }
+
+} // lineit()
+
+void waveit() { // Shifting pixels from the center to the left and right.
+
+  for (int i = NUM_LEDS - 1; i > NUM_LEDS / 2; i--) { // Move to the right.
+    leds[i] = leds[i - 1];
+  }
+
+  for (int i = 0; i < NUM_LEDS / 2; i++) { // Move to the left.
+    leds[i] = leds[i + 1];
+  }
+
+} // waveit()
